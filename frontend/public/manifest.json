@@ -1,0 +1,28 @@
+{
+    "manifest_version": 3,
+    "name": "Simplr",
+    "description": "Simplify complex text using AI",
+    "version": "1.0.0",
+    "action": {
+        "default_popup": "index.html"
+    },
+    "permissions": [
+        "activeTab",
+        "scripting",
+        "storage"
+    ],
+    "background": {
+        "service_worker": "assets/background.js",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "assets/content.js"
+            ]
+        }
+    ]
+}

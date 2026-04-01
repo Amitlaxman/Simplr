@@ -2,6 +2,9 @@
 
 Simplr is an AI-powered tool designed to simplify complex text. It consists of a Chrome Extension (Frontend) and a FastAPI service (Backend).
 
+<img width="1919" height="915" alt="image" src="https://github.com/user-attachments/assets/cf55742b-207c-45f5-bd8a-b0f327f55196" />
+
+
 ## Project Structure
 
 - `frontend/`: Chrome Extension built with React, TypeScript, and Vite.

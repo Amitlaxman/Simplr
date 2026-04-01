@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 const theme = {
     bg: '#08090a',
@@ -18,15 +18,52 @@ function App() {
     const [loading, setLoading] = useState(false);
     const [simplifiedText, setSimplifiedText] = useState('');
     const [error, setError] = useState('');
-    const [mode, setMode] = useState<'simplify' | 'chat'>('simplify');
+    const [mode, setMode] = useState<'simplify' | 'chat' | 'translate'>('simplify');
     const [question, setQuestion] = useState('');
     const [chatAnswer, setChatAnswer] = useState('');
+    const [translatedContent, setTranslatedContent] = useState('');
+    const [targetLanguage, setTargetLanguage] = useState('Hindi');
+    const [currentUrl, setCurrentUrl] = useState<string>('');
+    const [evaluationScores, setEvaluationScores] = useState<{rouge: number, factuality: number} | null>(null);
+    const [evaluating, setEvaluating] = useState(false);
+
+    useEffect(() => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const url = tabs[0]?.url;
+            if (url) {
+                setCurrentUrl(url);
+                chrome.storage.local.get([url], (result) => {
+                    const data = result[url];
+                    if (data) {
+                        if (data.simplifiedText) setSimplifiedText(data.simplifiedText);
+                        if (data.translatedContent) setTranslatedContent(data.translatedContent);
+                        if (data.targetLanguage) setTargetLanguage(data.targetLanguage);
+                    }
+                });
+            }
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!currentUrl) return;
+        chrome.storage.local.set({
+            [currentUrl]: {
+                simplifiedText,
+                translatedContent,
+                targetLanguage
+            }
+        });
+    }, [simplifiedText, translatedContent, targetLanguage, currentUrl]);
 
     const handleAction = async () => {
         console.log(`[Simplr] Starting handleAction in ${mode} mode`);
         setLoading(true);
         setError('');
-        if (mode === 'simplify') setSimplifiedText('');
+        if (mode === 'simplify') {
+            setSimplifiedText('');
+            setEvaluationScores(null);
+        }
+        else if (mode === 'translate') setTranslatedContent('');
         else setChatAnswer('');
 
         try {
@@ -34,8 +71,33 @@ function App() {
             if (!tab || !tab.id) throw new Error("No active tab found");
 
             const callBackend = async (text: string) => {
-                const url = mode === 'simplify' ? '/simplify/' : '/chat/';
-                const body = mode === 'simplify' ? { text } : { question, context_text: text };
+                let url = '';
+                let body: any = {};
+                if (mode === 'simplify') {
+                    url = '/simplify/';
+                    body = { text };
+                } else if (mode === 'chat') {
+                    url = '/chat/';
+                    body = { question, context_text: text };
+                } else if (mode === 'translate') {
+                    let sourceText = simplifiedText;
+                    if (!sourceText) {
+                        const simResp = await fetch(`http://localhost:8000/api/v1/simplify/`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ text }),
+                        });
+                        if (!simResp.ok) {
+                            const errData = await simResp.json().catch(() => ({}));
+                            throw new Error(errData.detail || "Failed to generate summary for translation");
+                        }
+                        const simData = await simResp.json();
+                        sourceText = simData.simplified_text;
+                        setSimplifiedText(sourceText);
+                    }
+                    url = '/translation/';
+                    body = { text: sourceText, target_language: targetLanguage };
+                }
 
                 const apiResponse = await fetch(`http://localhost:8000/api/v1${url}`, {
                     method: 'POST',
@@ -49,8 +111,31 @@ function App() {
                 }
 
                 const data = await apiResponse.json();
-                if (mode === 'simplify') setSimplifiedText(data.simplified_text);
-                else setChatAnswer(data.answer);
+                if (mode === 'simplify') {
+                    setSimplifiedText(data.simplified_text);
+                    
+                    // Asynchronously fetch evaluation scores without blocking user UI
+                    setEvaluating(true);
+                    setEvaluationScores(null);
+                    fetch(`http://localhost:8000/api/v1/evaluate/`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ original_text: text, generated_summary: data.simplified_text }),
+                    })
+                    .then(res => res.json())
+                    .then(evalData => {
+                        if (evalData.rouge_l_score_percent !== undefined) {
+                            setEvaluationScores({
+                                rouge: evalData.rouge_l_score_percent,
+                                factuality: evalData.factuality_score_percent
+                            });
+                        }
+                    })
+                    .catch(err => console.error("Evaluation failed", err))
+                    .finally(() => setEvaluating(false));
+                }
+                else if (mode === 'chat') setChatAnswer(data.answer);
+                else if (mode === 'translate') setTranslatedContent(data.translated_text);
             };
 
             chrome.tabs.sendMessage(tab.id, { action: "GET_PAGE_TEXT" }, async (response) => {
@@ -144,7 +229,7 @@ function App() {
                 marginBottom: '24px',
                 border: `1px solid ${theme.border}`
             }}>
-                {(['simplify', 'chat'] as const).map((m) => (
+                {(['simplify', 'chat', 'translate'] as const).map((m) => (
                     <button
                         key={m}
                         onClick={() => setMode(m)}
@@ -174,8 +259,24 @@ function App() {
                             position: 'relative'
                         }}>
                             <FormattedText text={simplifiedText} />
+                            
+                            <div style={{ marginTop: '16px', display: 'flex', gap: '8px', fontSize: '11px', flexWrap: 'wrap' }}>
+                                {evaluating ? (
+                                    <span style={{ color: theme.textSecondary }}>Running AI Evaluation...</span>
+                                ) : evaluationScores ? (
+                                    <>
+                                        <div style={{ background: 'rgba(77, 255, 136, 0.1)', color: theme.success, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${theme.success}30` }}>
+                                            Factuality: {evaluationScores.factuality}%
+                                        </div>
+                                        <div style={{ background: 'rgba(94, 106, 210, 0.1)', color: theme.accent, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${theme.accent}30` }}>
+                                            Accuracy (ROUGE): {evaluationScores.rouge}%
+                                        </div>
+                                    </>
+                                ) : null}
+                            </div>
+
                             <button
-                                onClick={() => setSimplifiedText('')}
+                                onClick={() => { setSimplifiedText(''); setEvaluationScores(null); }}
                                 style={{
                                     marginTop: '16px', padding: '8px 12px', borderRadius: '6px',
                                     background: theme.surfaceLighter, color: theme.text,
@@ -204,6 +305,64 @@ function App() {
                                 }}
                             >
                                 {loading ? 'Simplifying...' : 'Simplify Content'}
+                            </button>
+                        </div>
+                    )
+                ) : mode === 'translate' ? (
+                    translatedContent ? (
+                        <div style={{
+                            background: theme.surface,
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: '10px',
+                            padding: '16px',
+                            maxHeight: '350px',
+                            overflowY: 'auto',
+                            position: 'relative'
+                        }}>
+                            <FormattedText text={translatedContent} />
+                            <button
+                                onClick={() => setTranslatedContent('')}
+                                style={{
+                                    marginTop: '16px', padding: '8px 12px', borderRadius: '6px',
+                                    background: theme.surfaceLighter, color: theme.text,
+                                    border: `1px solid ${theme.border}`, cursor: 'pointer', fontSize: '12px'
+                                }}
+                            >
+                                ← Clear
+                            </button>
+                        </div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <p style={{ color: theme.textSecondary, fontSize: '14px', marginBottom: '8px', textAlign: 'center' }}>
+                                Generate and translate the summary to an Indian language.
+                            </p>
+                            <select
+                                value={targetLanguage}
+                                onChange={(e) => setTargetLanguage(e.target.value)}
+                                style={{
+                                    padding: '10px', borderRadius: '8px', background: theme.surface,
+                                    color: theme.text, border: `1px solid ${theme.border}`,
+                                    outline: 'none', fontSize: '14px', cursor: 'pointer'
+                                }}
+                            >
+                                {['Hindi', 'Tamil', 'Marathi', 'Telugu', 'Malayalam', 'Kannada'].map(lang => (
+                                    <option key={lang} value={lang}>{lang}</option>
+                                ))}
+                            </select>
+                            <button
+                                onClick={handleAction}
+                                disabled={loading}
+                                style={{
+                                    width: '100%', padding: '12px', borderRadius: '8px',
+                                    background: `linear-gradient(to bottom, ${theme.accentHover}, ${theme.accent})`,
+                                    color: 'white', border: 'none',
+                                    fontSize: '14px', fontWeight: 600, cursor: loading ? 'wait' : 'pointer',
+                                    opacity: loading ? 0.7 : 1,
+                                    boxShadow: `0 4px 16px ${theme.accent}30`,
+                                    borderTop: '1px solid rgba(255,255,255,0.2)'
+                                }}
+                            >
+                                {loading ? 'Translating...' : 'Translate Summary'}
                             </button>
                         </div>
                     )
